@@ -163,3 +163,6 @@ models/
 .idea/
 *.mp4
 *.avi
+
+out/
+wandb/

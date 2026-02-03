@@ -290,6 +290,7 @@ class ParametricModel:
         :param distance_between_subjects: Distance in meters between subjects. 0.2 for hand and 0.8 for body is good.
         """
         import vctoolkit.viso3d as vo3d
+        import cv2
         v_list, f_list = [], []
         f = self.face.copy()
         for i in range(len(vertex_list)):
@@ -302,7 +303,30 @@ class ParametricModel:
         verts = torch.cat(v_list, dim=1).cpu().numpy()
         faces = np.concatenate(f_list)
         if verts.shape[0] > 1:
-            vo3d.render_sequence_3d(verts, faces, 720, 720, 'a.mp4', fps, visible=True)
+            width, height = 720, 720
+            viewer = vo3d.o3d.visualization.Visualizer()
+            viewer.create_window(width=width, height=height, visible=True)
+            mesh = vo3d.create_o3d_mesh(verts[0], faces)
+            viewer.add_geometry(mesh)
+            
+            output_file = 'a.avi'
+            fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+            writer = cv2.VideoWriter(output_file, fourcc, fps, (width, height))
+            
+            for i in tqdm.trange(len(verts), desc='Rendering'):
+                mesh.vertices = vo3d.o3d.utility.Vector3dVector(verts[i])
+                mesh.compute_vertex_normals()
+                viewer.update_geometry(mesh)
+                viewer.poll_events()
+                viewer.update_renderer()
+                
+                img = viewer.capture_screen_float_buffer()
+                img = (np.asarray(img) * 255).astype(np.uint8)
+                img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                writer.write(img)
+                
+            writer.release()
+            viewer.destroy_window()
         else:
             vo3d.vis_mesh(verts[0], faces)
 

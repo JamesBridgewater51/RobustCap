@@ -1,7 +1,7 @@
 bleak==0.20.2
 keyboard==0.13.5
 matplotlib==3.5.2
-mediapipe==0.9.0
+mediapipe==0.10.32
 numpy==1.23.5
 numpy_quaternion==2022.4.3
 opencv_python_headless==4.2.0.34
