@@ -20,7 +20,7 @@ import argparse
 # Based on preprocess_rohm_data.py output location
 # Or we can just use paths.amass_dir if we stored it there, but instructions imply separate.
 # Let's assume user passes or we define a default if not in config.
-NYMERIA_DIR = '/home/minghao/src/robotflow/RoHM/third_party/RobustCap/out/Nymeria_smplx_preprocessed.robustcap'
+NYMERIA_DIR = '/home/minghao/src/robotflow/RoHM/third_party/RobustCap/out/Nymeria_test_smplx_preprocessed.robustcap'
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 body_model = art.ParametricModel(paths.smpl_file, device=device)
@@ -335,7 +335,7 @@ def train_rnn2():
         ]),
         batch_size=256,
         shuffle=True,
-        num_workers=4,
+        num_workers=8,
         pin_memory=True,
         prefetch_factor=2,
         persistent_workers=True,
@@ -347,7 +347,7 @@ def train_rnn2():
             NymeriaDataset(NYMERIA_DIR, kind='val', split_size=200)
         ]),
         batch_size=64,
-        num_workers=2,
+        num_workers=4,
         pin_memory=True,
         collate_fn=RNNDataset.make_collate_fn(device)
     )
@@ -422,7 +422,7 @@ def train_rnn3():
         ]),
         batch_size=256,
         shuffle=True,
-        num_workers=4,
+        num_workers=8,
         pin_memory=True,
         prefetch_factor=2,
         persistent_workers=True,
@@ -434,7 +434,7 @@ def train_rnn3():
             NymeriaDataset(NYMERIA_DIR, kind='val', split_size=200)
         ]),
         batch_size=64,
-        num_workers=2,
+        num_workers=4,
         pin_memory=True,
         collate_fn=RNNDataset.make_collate_fn(device)
     )
@@ -586,7 +586,7 @@ def train_rnn4():
         ]),
         batch_size=256,
         shuffle=True,
-        num_workers=4,
+        num_workers=8,
         pin_memory=True,
         prefetch_factor=2,
         persistent_workers=True,
@@ -598,7 +598,7 @@ def train_rnn4():
             NymeriaDataset(NYMERIA_DIR, kind='val', split_size=200)
         ]),
         batch_size=64,
-        num_workers=2,
+        num_workers=4,
         pin_memory=True,
         collate_fn=RNNDataset.make_collate_fn(device)
     )
@@ -708,7 +708,7 @@ def train_rnn6():
         ]),
         batch_size=256,
         shuffle=True,
-        num_workers=4,
+        num_workers=8,
         pin_memory=True,
         prefetch_factor=2,
         persistent_workers=True,
@@ -719,7 +719,7 @@ def train_rnn6():
             NymeriaDataset(NYMERIA_DIR, kind='val', split_size=200)
         ]),
         batch_size=64,
-        num_workers=2,
+        num_workers=4,
         pin_memory=True,
         collate_fn=RNNDataset.make_collate_fn(device)
     )
@@ -806,7 +806,7 @@ def train_rnn7():
         ]),
         batch_size=256,
         shuffle=True,
-        num_workers=4,
+        num_workers=8,
         pin_memory=True,
         prefetch_factor=2,
         persistent_workers=True,
@@ -818,7 +818,7 @@ def train_rnn7():
             NymeriaDataset(NYMERIA_DIR, kind='val', split_size=200)
         ]),
         batch_size=64,
-        num_workers=2,
+        num_workers=4,
         pin_memory=True,
         collate_fn=RNNDataset.make_collate_fn(device)
     )
@@ -887,7 +887,7 @@ def train_rnn8():
         ]),
         batch_size=256,
         shuffle=True,
-        num_workers=4,
+        num_workers=8,
         pin_memory=True,
         prefetch_factor=2,
         persistent_workers=True,
@@ -899,7 +899,7 @@ def train_rnn8():
             NymeriaDataset(NYMERIA_DIR, kind='val', split_size=200)
         ]),
         batch_size=64,
-        num_workers=2,
+        num_workers=4,
         pin_memory=True,
         collate_fn=RNNDataset.make_collate_fn(device)
     )

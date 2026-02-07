@@ -93,9 +93,6 @@ class RNNDataset(torch.utils.data.Dataset):
         """
         def collate_fn(x):
             data_list, label_list = list(zip(*x))
-            # Move to GPU in main process after workers prepare data
-            data_list = tuple(d.to(device) for d in data_list)
-            label_list = tuple(l.to(device) for l in label_list)
             return data_list, label_list
         return collate_fn
 

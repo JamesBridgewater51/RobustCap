@@ -74,6 +74,7 @@ def train(net, train_dataloader, vald_dataloader=None, save_dir='weights', loss_
     train_info_file = os.path.join(save_dir, 'train_info.pt')
     # structure_file = os.path.join(save_dir, 'structure.pt')
     optimizer_states_file = os.path.join(save_dir, 'optimizer_states.pt')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     min_vald_loss = 1e9
     num_iter_per_eopch = len(train_dataloader)
@@ -99,7 +100,7 @@ def train(net, train_dataloader, vald_dataloader=None, save_dir='weights', loss_
             if vald_dataloader is not None:
                 net.eval()
                 with torch.no_grad():
-                    vald_loss = sum([eval_fn(net(d), l) for d, l in vald_dataloader]) / num_vald_step
+                    vald_loss = sum([eval_fn(net(list(_.to(device) for _ in d)), list(_.to(device) for _ in l)) for d, l in vald_dataloader]) / num_vald_step
                     min_vald_loss = vald_loss.view(-1)[0].item()
                 print(', vald_loss:', vald_loss.cpu(), ', min_val_loss:', min_vald_loss, end='')
             print('')
@@ -114,6 +115,8 @@ def train(net, train_dataloader, vald_dataloader=None, save_dir='weights', loss_
         vald_loss_epoch = 0
         last_log_time = time.time()
         for i, (d, l) in enumerate(train_dataloader):
+            d = list(_.to(device) for _ in d)
+            l = list(_.to(device) for _ in l)
             if i < train_info['it']:
                 last_log_time = time.time()
                 continue
@@ -131,7 +134,7 @@ def train(net, train_dataloader, vald_dataloader=None, save_dir='weights', loss_
                 with torch.no_grad():
                     train_loss /= num_train_step
                     vald_loss = torch.tensor([train_loss]) if vald_dataloader is None else \
-                        sum([eval_fn(net(d), l) for d, l in vald_dataloader]) / num_vald_step
+                        sum([eval_fn(net(list(_.to(device) for _ in d)), list(_.to(device) for _ in l)) for d, l in vald_dataloader]) / num_vald_step
                 
                 current_time = time.time()
                 iter_per_sec = num_train_step / (current_time - last_log_time)
