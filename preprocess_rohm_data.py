@@ -105,7 +105,7 @@ def process_smplx_sequence(seq_smplx_np, preprocessed_data, body_model, mp_mask,
         faces_np = body_model.face
 
         # Create Visualizer
-        vis = o3d.visualization.Visualizer()
+        vis = o3d.visualization.VisualizerWithKeyCallback()
         vis.create_window(window_name="Motion Sequence Visualization", width=1280, height=720)
 
         # 1. Origin Coordinate Frame
@@ -163,9 +163,21 @@ def process_smplx_sequence(seq_smplx_np, preprocessed_data, body_model, mp_mask,
         ctr.set_lookat([0, 0, 0])
         ctr.set_zoom(0.8)
 
+        # Flag to control the animation loop
+        keep_running = [True]
+        def exit_callback(vis):
+            keep_running[0] = False
+            return False
+
+        # Register key callbacks for 'Q' and 'q'
+        vis.register_key_callback(ord('Q'), exit_callback)
+        vis.register_key_callback(ord('q'), exit_callback)
+
         # Animation Loop
         num_frames = verts_np.shape[0]
         for i in range(num_frames):
+            if not keep_running[0]:
+                break
             # Update Mesh
             mesh.vertices = o3d.utility.Vector3dVector(verts_np[i])
             mesh.compute_vertex_normals()
@@ -195,7 +207,7 @@ def process_smplx_sequence(seq_smplx_np, preprocessed_data, body_model, mp_mask,
 
             vis.poll_events()
             vis.update_renderer()
-            time.sleep(0.033) # ~30 FPS
+            # time.sleep(0.033) # ~30 FPS
 
         vis.destroy_window()
     

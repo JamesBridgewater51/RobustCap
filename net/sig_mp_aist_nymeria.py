@@ -20,7 +20,7 @@ import argparse
 # Based on preprocess_rohm_data.py output location
 # Or we can just use paths.amass_dir if we stored it there, but instructions imply separate.
 # Let's assume user passes or we define a default if not in config.
-NYMERIA_DIR = '/home/minghao/src/robotflow/RoHM/third_party/RobustCap/out/Nymeria_test_smplx_preprocessed.robustcap'
+NYMERIA_DIR = '/home/minghao/src/robotflow/RoHM/third_party/RobustCap/out/Nymeria_smplx_preprocessed.robustcap'
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 body_model = art.ParametricModel(paths.smpl_file, device=device)
@@ -40,7 +40,7 @@ class Net(torch.nn.Module):
     use_reproj_opt = False
     use_vision_updater = True
     use_imu_updater = True
-    name = 'sig_mp_nymeria' # Changed name slightly to separate weights if needed
+    name = 'sig_mp_nymeria_aist'  # Joint training with AIST + Nymeria
     gravityc = torch.tensor([-0.0029, 0.9980, -0.0273])
     imu_num = 6
     height_threhold = 0.15
@@ -290,10 +290,26 @@ def load_nymeria_dataset(data_dir, kind, split_size=-1):
     return torch.load(path)
 
 def train_rnn2():
+    def AISTDataset(data_dir, kind, split_size=-1):
+        """
+        AIST dataset loader for RNN2 (from sig_mp.py)
+        """
+        print('Reading %s dataset "%s"' % (kind, data_dir))
+        dataset = torch.load(os.path.join(data_dir, kind + '.pt'))
+        data, label = [], []
+        for i in tqdm.trange(len(dataset['pose'])):  # ith sequence
+            Rrw = art.math.axis_angle_to_rotation_matrix(dataset['pose'][i][:, :3]).transpose(1, 2)
+            orir = Rrw.unsqueeze(1).matmul(dataset['imu_ori'][i])
+            accr = Rrw.unsqueeze(1).matmul(dataset['imu_acc'][i].unsqueeze(-1)).squeeze(-1)
+            j3dr = Rrw.unsqueeze(1).matmul(dataset['joint3d'][i].unsqueeze(-1)).squeeze(-1)
+            j3dr = j3dr[:, 1:] - j3dr[:, :1]
+            data.append(torch.cat((accr.flatten(1), orir.flatten(1)), dim=1)[1:-1])
+            label.append(j3dr.flatten(1)[1:-1])
+        return RNNWithInitDataset(data, label, split_size=split_size, device=device)
+
     def NymeriaDataset(data_dir, kind, split_size=-1):
         dataset = load_nymeria_dataset(data_dir, kind)
         data, label = [], []
-        # Same logic as AMASSDataset/AISTDataset in sig_mp train_rnn2
         for i in tqdm.trange(len(dataset['imu_acc'])):
             p = art.math.axis_angle_to_rotation_matrix(dataset['pose'][i]).view(-1, 24, 3, 3)
             j3dr = (dataset['joint3d'][i][:, 1:] - dataset['joint3d'][i][:, :1]).bmm(p[:, 0])
@@ -306,20 +322,39 @@ def train_rnn2():
             label.append(j3dr.flatten(1)[1:-1])
         return RNNWithInitDataset(data, label, split_size=split_size, device=device)
 
-    print_yellow('=================== Training RNN2 [Nymeria] ===================')
+    print_yellow('=================== Training RNN2 [AIST + Nymeria] ===================')
     rnn_mse_loss_fn = RNNLossWrapper(torch.nn.MSELoss())
     rnn_dist_eval_fn = RNNLossWrapper(art.PositionErrorEvaluator())
     save_dir = os.path.join(paths.weight_dir, Net.name, 'rnn2')
     net = Net().rnn2.to(device)
 
-    train_dataloader = DataLoader(NymeriaDataset(NYMERIA_DIR, kind='train', split_size=200), 
-                                  256, shuffle=True, collate_fn=RNNDataset.collate_fn)
-    valid_dataloader = DataLoader(NymeriaDataset(NYMERIA_DIR, kind='val'), 
-                                  64, collate_fn=RNNDataset.collate_fn)
+    train_dataloader = DataLoader(
+        ConcatDataset([
+            AISTDataset(paths.aist_dir, kind='train', split_size=200),
+            NymeriaDataset(NYMERIA_DIR, kind='train', split_size=200)
+        ]),
+        batch_size=256,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
+        prefetch_factor=2,
+        persistent_workers=True,
+        collate_fn=RNNDataset.make_collate_fn(device)
+    )
+    valid_dataloader = DataLoader(
+        ConcatDataset([
+            AISTDataset(paths.aist_dir, kind='val', split_size=200),
+            NymeriaDataset(NYMERIA_DIR, kind='val', split_size=200)
+        ]),
+        batch_size=64,
+        num_workers=2,
+        pin_memory=True,
+        collate_fn=RNNDataset.make_collate_fn(device)
+    )
 
     train(net, train_dataloader, valid_dataloader, save_dir, loss_fn=rnn_mse_loss_fn, eval_fn=rnn_dist_eval_fn,
           num_epoch=150, num_iter_between_vald=20, clip_grad_norm=1, load_last_states=True,
-          eval_metric_names=['distance error (m)'], wandb_project_name='sig_mp_nymeria',
+          eval_metric_names=['distance error (m)'], wandb_project_name='sig_mp_nymeria_aist',
           wandb_config=None, wandb_watch=True, wandb_name='rnn2')
 
 def train_rnn3():
@@ -327,6 +362,26 @@ def train_rnn3():
         x = x.clone()
         x[:, -69:] = torch.normal(x[:, -69:], 0.04)
         return x
+
+    def AISTDataset(data_dir, kind, split_size=-1):
+        """
+        AIST dataset loader for RNN3 (from sig_mp.py)
+        """
+        print('Reading %s dataset "%s"' % (kind, data_dir))
+        dataset = torch.load(os.path.join(data_dir, kind + '.pt'))
+        data, label = [], []
+        for i in tqdm.trange(len(dataset['pose'])):  # ith sequence
+            Rrw = art.math.axis_angle_to_rotation_matrix(dataset['pose'][i][:, :3]).transpose(1, 2)
+            orir = Rrw.unsqueeze(1).matmul(dataset['imu_ori'][i])
+            accr = Rrw.unsqueeze(1).matmul(dataset['imu_acc'][i].unsqueeze(-1)).squeeze(-1)
+            j3dr = Rrw.unsqueeze(1).matmul(dataset['joint3d'][i].unsqueeze(-1)).squeeze(-1)
+            j3dr = j3dr[:, 1:] - j3dr[:, :1]
+            v3dw = (dataset['joint3d'][i][2:] - dataset['joint3d'][i][:-2]) * 30
+            v3dw = torch.cat((torch.zeros(1, 3), v3dw[:, 0], torch.zeros(1, 3)), dim=0) / vel_scale
+            v3dr = Rrw.matmul(v3dw.unsqueeze(-1)).squeeze(-1)
+            data.append(torch.cat((accr.flatten(1), orir.flatten(1), j3dr.flatten(1)), dim=1)[1:-1])
+            label.append(v3dr.flatten(1)[1:-1])
+        return RNNDataset(data, label, split_size=split_size, augment_fn=augment_fn, device=device)
 
     def NymeriaDataset(data_dir, kind, split_size=-1):
         dataset = load_nymeria_dataset(data_dir, kind)
@@ -346,7 +401,7 @@ def train_rnn3():
             label.append(v3dr.flatten(1)[1:-1])
         return RNNDataset(data, label, split_size=split_size, augment_fn=augment_fn, device=device)
 
-    print_yellow('=================== Training RNN3 [Nymeria] ===================')
+    print_yellow('=================== Training RNN3 [AIST + Nymeria] ===================')
     def loss_fn(x, y):
         l = x.shape[0]
         f1 = mse(x, y)
@@ -360,19 +415,69 @@ def train_rnn3():
     save_dir = os.path.join(paths.weight_dir, Net.name, 'rnn3')
     net = Net().rnn3.to(device)
 
-    train_dataloader = DataLoader(NymeriaDataset(NYMERIA_DIR, kind='train', split_size=200), 
-                                  256, shuffle=True, collate_fn=RNNDataset.collate_fn)
-    valid_dataloader = DataLoader(NymeriaDataset(NYMERIA_DIR, kind='val'), 
-                                  64, collate_fn=RNNDataset.collate_fn)
+    train_dataloader = DataLoader(
+        ConcatDataset([
+            AISTDataset(paths.aist_dir, kind='train', split_size=200),
+            NymeriaDataset(NYMERIA_DIR, kind='train', split_size=200)
+        ]),
+        batch_size=256,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
+        prefetch_factor=2,
+        persistent_workers=True,
+        collate_fn=RNNDataset.make_collate_fn(device)
+    )
+    valid_dataloader = DataLoader(
+        ConcatDataset([
+            AISTDataset(paths.aist_dir, kind='val', split_size=200),
+            NymeriaDataset(NYMERIA_DIR, kind='val', split_size=200)
+        ]),
+        batch_size=64,
+        num_workers=2,
+        pin_memory=True,
+        collate_fn=RNNDataset.make_collate_fn(device)
+    )
 
     train(net, train_dataloader, valid_dataloader, save_dir, loss_fn=rnn_loss_fn, eval_fn=rnn_loss_fn,
           num_epoch=200, num_iter_between_vald=20, clip_grad_norm=1, load_last_states=True,
-          wandb_project_name='sig_mp_nymeria',
+          wandb_project_name='sig_mp_nymeria_aist',
           wandb_config=None, wandb_watch=True, wandb_name='rnn3')
 
+
 def train_rnn4():
+
     def augment_fn(x):
         return x
+
+    def AISTDataset(data_dir, kind, split_size=-1):
+        """
+        AIST dataset loader for RNN4 (from sig_mp.py) - uses real camera and 2D keypoints
+        """
+        print('Reading %s dataset "%s"' % (kind, data_dir))
+        dataset = torch.load(os.path.join(data_dir, kind + '.pt'))
+        data, label = [], []
+        for i in tqdm.trange(len(dataset['pose'])):  # ith sequence
+            for j in range(9):  # jth camera view
+                if dataset['joint2d_mp'][i][j] is None: continue
+                Tcw = dataset['cam_T'][i][j]
+                Kinv = dataset['cam_K'][i][j].inverse()
+                oric = Tcw[:3, :3].matmul(dataset['imu_ori'][i])
+                accc = Tcw.matmul(art.math.append_zero(dataset['imu_acc'][i]).unsqueeze(-1)).squeeze(-1)[..., :3]
+                j3dc = Tcw.matmul(art.math.append_one(dataset['joint3d'][i]).unsqueeze(-1)).squeeze(-1)[..., :3]
+                j3dc = j3dc[:, 1:] - j3dc[:, :1]
+                j2dc = torch.zeros(len(oric), 33, 3)
+                j2dc[..., :2] = dataset['joint2d_mp'][i][j][..., :2]
+                j2dc[..., 0] = j2dc[..., 0] * 1920
+                j2dc[..., 1] = j2dc[..., 1] * 1080
+                j2dc = Kinv.matmul(art.math.append_one(j2dc[..., :2]).unsqueeze(-1)).squeeze(-1)
+                j2dc[..., :2] = j2dc[..., :2] / (get_bbox_scale(j2dc)).view(-1, 1, 1)
+                j2dc[:, 24:, :2] = j2dc[:, 24:, :2] - j2dc[:, 23:24, :2]
+                j2dc[:, :23, :2] = j2dc[:, :23, :2] - j2dc[:, 23:24, :2]
+                j2dc[..., -1] = dataset['joint2d_mp'][i][j][..., -1]
+                data.append(torch.cat((accc.flatten(1), oric.flatten(1), j2dc.flatten(1)), dim=1)[1:-1])
+                label.append(j3dc.flatten(1)[1:-1])
+        return RNNDataset(data, label, split_size=split_size, device=device, augment_fn=augment_fn)
 
     class NymeriaDataset(RNNDataset):
         def __init__(self, data_dir, kind, split_size=-1):
@@ -402,9 +507,30 @@ def train_rnn4():
                 j3dw_mp[:, 26] = j3dw[:, 5].clone()
                 j3dw_mp[:, 27] = j3dw[:, 7].clone()
                 j3dw_mp[:, 28] = j3dw[:, 8].clone()
-                data.append(torch.cat((accw.flatten(1), oriw.flatten(1), j3dw_mp.flatten(1)), dim=1)[1:-1])
-                label.append(j3dw.flatten(1)[1:-1])
-            super(NymeriaDataset, self).__init__(data, label, split_size=split_size)
+                if split_size > 0:
+                    T = j3dw.shape[0]
+                    for start in range(0, T, split_size):
+                        end = min(start + split_size, T)
+                        if end - start < 10:  # Skip very short chunks
+                            continue
+                        
+                        # Chunk slice
+                        accw_chunk = accw[start:end]
+                        oriw_chunk = oriw[start:end]
+                        j3dw_mp_chunk = j3dw_mp[start:end]
+                        j3dw_chunk = j3dw[start:end]
+                        
+                        # Re-center relative to the START of this chunk
+                        chunk_root_offset = j3dw_chunk[0, 0].clone() 
+                        j3dw_chunk = j3dw_chunk - chunk_root_offset
+                        j3dw_mp_chunk = j3dw_mp_chunk - chunk_root_offset
+                        
+                        data.append(torch.cat((accw_chunk.flatten(1), oriw_chunk.flatten(1), j3dw_mp_chunk.flatten(1)), dim=1)[1:-1])
+                        label.append(j3dw_chunk.flatten(1)[1:-1])
+                else:
+                    data.append(torch.cat((accw.flatten(1), oriw.flatten(1), j3dw_mp.flatten(1)), dim=1)[1:-1])
+                    label.append(j3dw.flatten(1)[1:-1])
+            super(NymeriaDataset, self).__init__(data, label, split_size=-1)
 
         def __getitem__(self, i):
             data, label = super(NymeriaDataset, self).__getitem__(i)
@@ -445,24 +571,43 @@ def train_rnn4():
             # 输出语义不应该 包含 j3dc
             data = torch.cat((accc.flatten(1), oric.flatten(1), j2dc.flatten(1)), dim=1)
             label = j3dc.flatten(1)
-            return augment_fn(data).to(device), label.to(device)
+            return augment_fn(data), label  # GPU transfer happens in collate_fn
 
-    print_yellow('=================== Training RNN4 [Nymeria] ===================')
+    print_yellow('=================== Training RNN4 [AIST + Nymeria] ===================')
     rnn_mse_loss_fn = RNNLossWrapper(torch.nn.MSELoss())
     rnn_dist_eval_fn = RNNLossWrapper(art.PositionErrorEvaluator())
     save_dir = os.path.join(paths.weight_dir, Net.name, 'rnn4')
     net = Net().rnn4.to(device)
     
-    train_dataloader = DataLoader(NymeriaDataset(NYMERIA_DIR, kind='train', split_size=200), 
-                                  256, shuffle=True, collate_fn=RNNDataset.collate_fn)
-    valid_dataloader = DataLoader(NymeriaDataset(NYMERIA_DIR, kind='val'), 
-                                  64, collate_fn=RNNDataset.collate_fn)
+    train_dataloader = DataLoader(
+        ConcatDataset([
+            AISTDataset(paths.aist_dir, kind='train', split_size=200),
+            NymeriaDataset(NYMERIA_DIR, kind='train', split_size=200)
+        ]),
+        batch_size=256,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
+        prefetch_factor=2,
+        persistent_workers=True,
+        collate_fn=RNNDataset.make_collate_fn(device)
+    )
+    valid_dataloader = DataLoader(
+        ConcatDataset([
+            AISTDataset(paths.aist_dir, kind='val', split_size=200),
+            NymeriaDataset(NYMERIA_DIR, kind='val', split_size=200)
+        ]),
+        batch_size=64,
+        num_workers=2,
+        pin_memory=True,
+        collate_fn=RNNDataset.make_collate_fn(device)
+    )
     
     optimizer = torch.optim.Adam(net.parameters(), lr=1e-4)
 
     train(net, train_dataloader, valid_dataloader, save_dir, loss_fn=rnn_mse_loss_fn, eval_fn=rnn_dist_eval_fn,
           num_epoch=200, num_iter_between_vald=60, clip_grad_norm=1, load_last_states=True,
-          eval_metric_names=['distance error (m)'], wandb_project_name='sig_mp_nymeria',
+          eval_metric_names=['distance error (m)'], wandb_project_name='sig_mp_nymeria_aist',
           wandb_config=None, wandb_watch=True, wandb_name='rnn4_final', optimizer=optimizer)
 
 def train_rnn6():
@@ -495,9 +640,30 @@ def train_rnn6():
                 j3dw_mp[:, 26] = j3dw[:, 5].clone()
                 j3dw_mp[:, 27] = j3dw[:, 7].clone()
                 j3dw_mp[:, 28] = j3dw[:, 8].clone()
-                data.append(torch.cat((accw.flatten(1), oriw.flatten(1), j3dw_mp.flatten(1)), dim=1)[1:-1])
-                label.append(j3dw.flatten(1)[1:-1])
-            super(NymeriaDataset, self).__init__(data, label, split_size=split_size)
+                if split_size > 0:
+                    T = j3dw.shape[0]
+                    for start in range(0, T, split_size):
+                        end = min(start + split_size, T)
+                        if end - start < 10:  # Skip very short chunks
+                            continue
+                        
+                        # Chunk slice
+                        accw_chunk = accw[start:end]
+                        oriw_chunk = oriw[start:end]
+                        j3dw_mp_chunk = j3dw_mp[start:end]
+                        j3dw_chunk = j3dw[start:end]
+                        
+                        # Re-center relative to the START of this chunk
+                        chunk_root_offset = j3dw_chunk[0, 0].clone() 
+                        j3dw_chunk = j3dw_chunk - chunk_root_offset
+                        j3dw_mp_chunk = j3dw_mp_chunk - chunk_root_offset
+                        
+                        data.append(torch.cat((accw_chunk.flatten(1), oriw_chunk.flatten(1), j3dw_mp_chunk.flatten(1)), dim=1)[1:-1])
+                        label.append(j3dw_chunk.flatten(1)[1:-1])
+                else:
+                    data.append(torch.cat((accw.flatten(1), oriw.flatten(1), j3dw_mp.flatten(1)), dim=1)[1:-1])
+                    label.append(j3dw.flatten(1)[1:-1])
+            super(NymeriaDataset, self).__init__(data, label, split_size=-1)
 
         def __getitem__(self, i):
             data, label = super(NymeriaDataset, self).__getitem__(i)
@@ -529,27 +695,65 @@ def train_rnn6():
             label = j3dc[:, 0] # Output is translation
             j3dc = j3dc[:, 1:] - j3dc[:, :1]
             data = torch.cat((accc.flatten(1), oric.flatten(1), j2dc.flatten(1), j3dc.flatten(1)), dim=1)
-            return augment_fn(data).to(device), label.to(device)
+            return augment_fn(data), label
 
-    print_yellow('=================== Training RNN6 [Nymeria] ===================')
+    print_yellow('=================== Training RNN6 [AIST + Nymeria] ===================')
     rnn_loss_fn = RNNLossWrapper(torch.nn.MSELoss())
     save_dir = os.path.join(paths.weight_dir, Net.name, 'rnn6')
     net = Net().rnn6.to(device)
     
-    train_dataloader = DataLoader(NymeriaDataset(NYMERIA_DIR, kind='train', split_size=200), 
-                                  256, shuffle=True, collate_fn=RNNDataset.collate_fn)
-    valid_dataloader = DataLoader(NymeriaDataset(NYMERIA_DIR, kind='val'), 
-                                  64, collate_fn=RNNDataset.collate_fn)
+    train_dataloader = DataLoader(
+        ConcatDataset([
+            NymeriaDataset(NYMERIA_DIR, kind='train', split_size=200)
+        ]),
+        batch_size=256,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
+        prefetch_factor=2,
+        persistent_workers=True,
+        collate_fn=RNNDataset.make_collate_fn(device)
+    )
+    valid_dataloader = DataLoader(
+        ConcatDataset([
+            NymeriaDataset(NYMERIA_DIR, kind='val', split_size=200)
+        ]),
+        batch_size=64,
+        num_workers=2,
+        pin_memory=True,
+        collate_fn=RNNDataset.make_collate_fn(device)
+    )
 
     train(net, train_dataloader, valid_dataloader, save_dir, loss_fn=rnn_loss_fn, eval_fn=rnn_loss_fn,
           num_epoch=100, num_iter_between_vald=60, clip_grad_norm=1, load_last_states=True,
-          wandb_project_name='sig_mp_nymeria',
+          wandb_project_name='sig_mp_nymeria_aist',
           wandb_config=None, wandb_watch=True, wandb_name='rnn6', lr_scheduler_patience=5)
 
 def train_rnn7():
     def augment_fn(x):
         x = torch.normal(x, 0.03)
         return x
+
+    def AISTDataset(data_dir, kind, split_size=-1):
+        """
+        AIST dataset loader for RNN7 (from sig_mp.py)
+        """
+        print('Reading %s dataset "%s"' % (kind, data_dir))
+        dataset = torch.load(os.path.join(data_dir, kind + '.pt'))
+        data, label = [], []
+        for i in tqdm.trange(len(dataset['pose'])):  # ith sequence
+            Rrw = art.math.axis_angle_to_rotation_matrix(dataset['pose'][i][:, :3]).transpose(1, 2)
+            orir = dataset['imu_ori'][i].clone()
+            orir[:, :5] = Rrw.unsqueeze(1).matmul(dataset['imu_ori'][i][:, :5])
+            accr = Rrw.unsqueeze(1).matmul(dataset['imu_acc'][i].unsqueeze(-1)).squeeze(-1)
+            j3dr = Rrw.unsqueeze(1).matmul(dataset['joint3d'][i].unsqueeze(-1)).squeeze(-1)
+            j3dr = j3dr[:, 1:] - j3dr[:, :1]
+            pose = art.math.axis_angle_to_rotation_matrix(dataset['pose'][i]).view(-1, 24, 3, 3)
+            pose[:, 0] = torch.eye(3)
+            pose = art.math.rotation_matrix_to_r6d(body_model.forward_kinematics_R(pose)).view(-1, 24, 6)
+            data.append(torch.cat((accr.flatten(1), orir.flatten(1), j3dr.flatten(1)), dim=1)[1:-1])
+            label.append(pose.flatten(1)[1:-1])
+        return RNNDataset(data, label, split_size=split_size, augment_fn=augment_fn, device=device)
 
     def NymeriaDataset(data_dir, kind, split_size=-1):
         dataset = load_nymeria_dataset(data_dir, kind)
@@ -590,19 +794,38 @@ def train_rnn7():
             l2 = self.weighted_mse(self.forward_kinematics(x), self.forward_kinematics(y))
             return l1 + l2 * 100
 
-    print_yellow('=================== Training RNN7 [Nymeria] ===================')
+    print_yellow('=================== Training RNN7 [AIST + Nymeria] ===================')
     rnn_loss_fn = RNNLossWrapper(Loss())
     save_dir = os.path.join(paths.weight_dir, Net.name, 'rnn7')
     net = Net().rnn7.to(device)
     
-    train_dataloader = DataLoader(NymeriaDataset(NYMERIA_DIR, kind='train', split_size=200), 
-                                  256, shuffle=True, collate_fn=RNNDataset.collate_fn)
-    valid_dataloader = DataLoader(NymeriaDataset(NYMERIA_DIR, kind='val'), 
-                                  64, collate_fn=RNNDataset.collate_fn)
+    train_dataloader = DataLoader(
+        ConcatDataset([
+            AISTDataset(paths.aist_dir, kind='train', split_size=200),
+            NymeriaDataset(NYMERIA_DIR, kind='train', split_size=200)
+        ]),
+        batch_size=256,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
+        prefetch_factor=2,
+        persistent_workers=True,
+        collate_fn=RNNDataset.make_collate_fn(device)
+    )
+    valid_dataloader = DataLoader(
+        ConcatDataset([
+            AISTDataset(paths.aist_dir, kind='val', split_size=200),
+            NymeriaDataset(NYMERIA_DIR, kind='val', split_size=200)
+        ]),
+        batch_size=64,
+        num_workers=2,
+        pin_memory=True,
+        collate_fn=RNNDataset.make_collate_fn(device)
+    )
 
     train(net, train_dataloader, valid_dataloader, save_dir, loss_fn=rnn_loss_fn, eval_fn=rnn_loss_fn,
           num_epoch=120, num_iter_between_vald=20, clip_grad_norm=1, load_last_states=True,
-          wandb_project_name='sig_mp_nymeria',
+          wandb_project_name='sig_mp_nymeria_aist',
           wandb_config=None, wandb_watch=True, wandb_name='rnn7', lr_scheduler_patience=5)
 
 def train_rnn8():
@@ -611,6 +834,27 @@ def train_rnn8():
         x = x.clone()
         x[:, -69:] = torch.normal(x[:, -69:], 0.03)
         return x
+
+    def AISTDataset(data_dir, kind, split_size=-1):
+        """
+        AIST dataset loader for RNN8 (from sig_mp.py)
+        """
+        print('Reading %s dataset "%s"' % (kind, data_dir))
+        dataset = torch.load(os.path.join(data_dir, kind + '.pt'))
+        data, label = [], []
+        for i in tqdm.trange(len(dataset['pose'])):  # ith sequence
+            Rrw = art.math.axis_angle_to_rotation_matrix(dataset['pose'][i][:, :3]).transpose(1, 2)
+            orir = Rrw.unsqueeze(1).matmul(dataset['imu_ori'][i])
+            accr = Rrw.unsqueeze(1).matmul(dataset['imu_acc'][i].unsqueeze(-1)).squeeze(-1)
+            j3dr = Rrw.unsqueeze(1).matmul(dataset['joint3d'][i].unsqueeze(-1)).squeeze(-1)
+            j3dr = j3dr[:, 1:] - j3dr[:, :1]
+            v3dw = (dataset['joint3d'][i][2:] - dataset['joint3d'][i][:-2]) * 30
+            contacts = torch.zeros(v3dw.shape[0], 2)
+            contacts[v3dw[:, 10:12].norm(dim=2) < 0.25] = 1
+            contacts = torch.cat((contacts[:1], contacts, contacts[-1:]), dim=0)
+            data.append(torch.cat((accr.flatten(1), orir.flatten(1), j3dr.flatten(1)), dim=1)[1:-1])
+            label.append(contacts.flatten(1)[1:-1])
+        return RNNDataset(data, label, split_size=split_size, augment_fn=augment_fn, device=device)
 
     def NymeriaDataset(data_dir, kind, split_size=-1):
         dataset = load_nymeria_dataset(data_dir, kind)
@@ -634,15 +878,33 @@ def train_rnn8():
             label.append(contacts.flatten(1)[1:-1])
         return RNNDataset(data, label, split_size=split_size, augment_fn=augment_fn, device=device)
 
-    print_yellow('=================== Training RNN8 ===================')
+    print_yellow('=================== Training RNN8 [AIST + Nymeria] ===================')
 
-    train_dataloader = DataLoader(NymeriaDataset(NYMERIA_DIR, kind='train', split_size=200), 
-                                  256, shuffle=True, collate_fn=RNNDataset.collate_fn)
-    valid_dataloader = DataLoader(NymeriaDataset(NYMERIA_DIR, kind='val'), 
-                                  64, collate_fn=RNNDataset.collate_fn)
+    train_dataloader = DataLoader(
+        ConcatDataset([
+            AISTDataset(paths.aist_dir, kind='train', split_size=200),
+            NymeriaDataset(NYMERIA_DIR, kind='train', split_size=200)
+        ]),
+        batch_size=256,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
+        prefetch_factor=2,
+        persistent_workers=True,
+        collate_fn=RNNDataset.make_collate_fn(device)
+    )
+    valid_dataloader = DataLoader(
+        ConcatDataset([
+            AISTDataset(paths.aist_dir, kind='val', split_size=200),
+            NymeriaDataset(NYMERIA_DIR, kind='val', split_size=200)
+        ]),
+        batch_size=64,
+        num_workers=2,
+        pin_memory=True,
+        collate_fn=RNNDataset.make_collate_fn(device)
+    )
 
-
-    all_labels = torch.cat(train_dataloader.dataset.label)
+    all_labels = torch.cat(train_dataloader.dataset.datasets[0].label + train_dataloader.dataset.datasets[1].label)
     pos_weight = (1 - all_labels).sum(dim=0) / all_labels.sum(dim=0)
     rnn_bce_loss_fn = RNNLossWrapper(torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight.to(device)))
 
@@ -651,7 +913,7 @@ def train_rnn8():
 
     train(net, train_dataloader, valid_dataloader, save_dir, loss_fn=rnn_bce_loss_fn, eval_fn=rnn_bce_loss_fn,
           num_epoch=80, num_iter_between_vald=20, clip_grad_norm=1, load_last_states=True,
-          wandb_project_name='sig_mp',
+          wandb_project_name='sig_mp_nymeria_aist',
           wandb_config=None, wandb_watch=True, wandb_name='rnn8', lr_scheduler_patience=10)
 
 if __name__ == '__main__':

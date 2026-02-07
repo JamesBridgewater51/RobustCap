@@ -64,7 +64,9 @@ class RNNDataset(torch.utils.data.Dataset):
     def __getitem__(self, i):
         data = self.data[i] if self.augment_fn is None else self.augment_fn(self.data[i])
         label = self.label[i]
-        return data.to(self.device), label.to(self.device)
+        # Return CPU tensors for worker process compatibility
+        # GPU transfer happens in collate_fn (main process)
+        return data, label
 
     def __len__(self):
         return len(self.data)
@@ -73,8 +75,29 @@ class RNNDataset(torch.utils.data.Dataset):
     def collate_fn(x):
         r"""
         [[seq0, label0], [seq1, label1], [seq2, label2]] -> [[seq0, seq1, seq2], [label0, label1, label2]]
+        Note: This is kept for backwards compatibility. Use make_collate_fn for GPU transfer.
         """
         return list(zip(*x))
+
+    @classmethod
+    def make_collate_fn(cls, device):
+        r"""
+        Create a collate function that moves data to the specified device.
+        This should be used with num_workers > 0 for proper GPU transfer.
+
+        Args:
+            device: Target device (e.g., torch.device('cuda'))
+
+        Returns:
+            A collate function that batches and transfers data to GPU.
+        """
+        def collate_fn(x):
+            data_list, label_list = list(zip(*x))
+            # Move to GPU in main process after workers prepare data
+            data_list = tuple(d.to(device) for d in data_list)
+            label_list = tuple(l.to(device) for l in label_list)
+            return data_list, label_list
+        return collate_fn
 
 
 class RNNWithInitDataset(RNNDataset):

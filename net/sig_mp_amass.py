@@ -32,7 +32,7 @@ class Net(torch.nn.Module):
     use_reproj_opt = False
     use_vision_updater = True
     use_imu_updater = True
-    name = 'sig_mp_amass_aist'
+    name = 'sig_mp_amass'
     gravityc = torch.tensor([-0.0029, 0.9980, -0.0273])
     imu_num = 6
     height_threhold = 0.15
@@ -299,22 +299,6 @@ def sync_mp3d(vert, joint):
     return syn_3d
 
 def train_rnn2():
-    def AISTDataset(data_dir, kind, split_size=-1):
-        r"""
-        kind in ['train', 'val', 'test']
-        """
-        print('Reading %s dataset "%s"' % (kind, data_dir))
-        dataset = torch.load(os.path.join(data_dir, kind + '.pt'))
-        data, label = [], []
-        for i in tqdm.trange(len(dataset['pose'])):  # ith sequence
-            Rrw = art.math.axis_angle_to_rotation_matrix(dataset['pose'][i][:, :3]).transpose(1, 2)
-            orir = Rrw.unsqueeze(1).matmul(dataset['imu_ori'][i])
-            accr = Rrw.unsqueeze(1).matmul(dataset['imu_acc'][i].unsqueeze(-1)).squeeze(-1)
-            j3dr = Rrw.unsqueeze(1).matmul(dataset['joint3d'][i].unsqueeze(-1)).squeeze(-1)
-            j3dr = j3dr[:, 1:] - j3dr[:, :1]
-            data.append(torch.cat((accr.flatten(1), orir.flatten(1)), dim=1)[1:-1])
-            label.append(j3dr.flatten(1)[1:-1])
-        return RNNWithInitDataset(data, label, split_size=split_size, device=device)
 
     def AMASSDataset(data_dir, kind, split_size=-1):
         r"""
@@ -343,12 +327,10 @@ def train_rnn2():
     net = Net().rnn2.to(device)
 
     train_dataloader = DataLoader(ConcatDataset([
-        AISTDataset(paths.aist_dir, kind='train', split_size=200),
         AMASSDataset(paths.amass_dir, kind='train', split_size=200)
     ]), 256, shuffle=True, collate_fn=RNNDataset.collate_fn)
     valid_dataloader = DataLoader(ConcatDataset([
-        AISTDataset(paths.aist_dir, kind='val', split_size=200),
-        AMASSDataset(paths.amass_dir, kind='val', split_size=200)
+        AMASSDataset(paths.amass_dir, kind='val')
     ]), 64, collate_fn=RNNDataset.collate_fn)
 
     train(net, train_dataloader, valid_dataloader, save_dir, loss_fn=rnn_mse_loss_fn, eval_fn=rnn_dist_eval_fn,
@@ -361,26 +343,6 @@ def train_rnn3():
         x = x.clone()
         x[:, -69:] = torch.normal(x[:, -69:], 0.04)
         return x
-
-    def AISTDataset(data_dir, kind, split_size=-1):
-        r"""
-        kind in ['train', 'val', 'test']
-        """
-        print('Reading %s dataset "%s"' % (kind, data_dir))
-        dataset = torch.load(os.path.join(data_dir, kind + '.pt'))
-        data, label = [], []
-        for i in tqdm.trange(len(dataset['pose'])):  # ith sequence
-            Rrw = art.math.axis_angle_to_rotation_matrix(dataset['pose'][i][:, :3]).transpose(1, 2)
-            orir = Rrw.unsqueeze(1).matmul(dataset['imu_ori'][i])
-            accr = Rrw.unsqueeze(1).matmul(dataset['imu_acc'][i].unsqueeze(-1)).squeeze(-1)
-            j3dr = Rrw.unsqueeze(1).matmul(dataset['joint3d'][i].unsqueeze(-1)).squeeze(-1)
-            j3dr = j3dr[:, 1:] - j3dr[:, :1]
-            v3dw = (dataset['joint3d'][i][2:] - dataset['joint3d'][i][:-2]) * 30
-            v3dw = torch.cat((torch.zeros(1, 3), v3dw[:, 0], torch.zeros(1, 3)), dim=0) / vel_scale
-            v3dr = Rrw.matmul(v3dw.unsqueeze(-1)).squeeze(-1)
-            data.append(torch.cat((accr.flatten(1), orir.flatten(1), j3dr.flatten(1)), dim=1)[1:-1])
-            label.append(v3dr.flatten(1)[1:-1])
-        return RNNDataset(data, label, split_size=split_size, augment_fn=augment_fn, device=device)
 
     def AMASSDataset(data_dir, kind, split_size=-1):
         r"""
@@ -420,12 +382,10 @@ def train_rnn3():
     net = Net().rnn3.to(device)
 
     train_dataloader = DataLoader(ConcatDataset([
-        AISTDataset(paths.aist_dir, kind='train', split_size=200),
         AMASSDataset(paths.amass_dir, kind='train', split_size=200)
     ]), 256, shuffle=True, collate_fn=RNNDataset.collate_fn)
     valid_dataloader = DataLoader(ConcatDataset([
-        AISTDataset(paths.aist_dir, kind='val', split_size=200),
-        AMASSDataset(paths.amass_dir, kind='val', split_size=200)
+        AMASSDataset(paths.amass_dir, kind='val')
     ]), 64, collate_fn=RNNDataset.collate_fn)
 
     train(net, train_dataloader, valid_dataloader, save_dir, loss_fn=rnn_loss_fn, eval_fn=rnn_loss_fn,
@@ -440,50 +400,6 @@ def train_rnn4():
         # x_drop = F.dropout(x_drop, 0.4)
         # return torch.cat((x_drop, x[:, -33*3:]), dim=1)
         return x
-
-    def AISTDataset(data_dir, kind, split_size=-1):
-        r"""
-        kind in ['train', 'val', 'test']
-        """
-        print('Reading %s dataset "%s"' % (kind, data_dir))
-        dataset = torch.load(os.path.join(data_dir, kind + '.pt'))
-        data, label = [], []
-        for i in tqdm.trange(len(dataset['pose'])):  # ith sequence
-            for j in range(9):  # jth camera view
-                if dataset['joint2d_mp'][i][j] is None: continue
-                Tcw = dataset['cam_T'][i][j]
-                Kinv = dataset['cam_K'][i][j].inverse()
-                oric = Tcw[:3, :3].matmul(dataset['imu_ori'][i])
-                accc = Tcw.matmul(art.math.append_zero(dataset['imu_acc'][i]).unsqueeze(-1)).squeeze(-1)[..., :3]
-                j3dc = Tcw.matmul(art.math.append_one(dataset['joint3d'][i]).unsqueeze(-1)).squeeze(-1)[..., :3]
-                j3dc = j3dc[:, 1:] - j3dc[:, :1]
-                j2dc = torch.zeros(len(oric), 33, 3)
-                j2dc[..., :2] = dataset['joint2d_mp'][i][j][..., :2]
-                j2dc[..., 0] = j2dc[..., 0] * 1920
-                j2dc[..., 1] = j2dc[..., 1] * 1080
-                j2dc = Kinv.matmul(art.math.append_one(j2dc[..., :2]).unsqueeze(-1)).squeeze(-1)
-                j2dc[..., :2] = j2dc[..., :2] / (get_bbox_scale(j2dc)).view(-1, 1, 1)
-                # do the same thing as cliff bbox info
-                j2dc[:, 24:, :2] = j2dc[:, 24:, :2] - j2dc[:, 23:24, :2]
-                j2dc[:, :23, :2] = j2dc[:, :23, :2] - j2dc[:, 23:24, :2]
-                j2dc[..., -1] = dataset['joint2d_mp'][i][j][..., -1]
-                data.append(torch.cat((accc.flatten(1), oric.flatten(1), j2dc.flatten(1)), dim=1)[1:-1])
-                label.append(j3dc.flatten(1)[1:-1])
-
-                # occlusion data
-                if dataset['joint2d_occ'][i][j] is None or len(dataset['joint2d_occ'][i][j]) != len(oric): continue
-                j2dc_occ = torch.zeros(len(oric), 33, 3)
-                j2dc_occ[..., :2] = dataset['joint2d_occ'][i][j][..., :2]
-                j2dc_occ[..., 0] = j2dc_occ[..., 0] * 1920
-                j2dc_occ[..., 1] = j2dc_occ[..., 1] * 1080
-                j2dc_occ = Kinv.matmul(art.math.append_one(j2dc_occ[..., :2]).unsqueeze(-1)).squeeze(-1)
-                j2dc[..., :2] = j2dc[..., :2] / (get_bbox_scale(j2dc_occ)).view(-1, 1, 1)
-                j2dc_occ[:, 24:, :2] = j2dc_occ[:, 24:, :2] - j2dc_occ[:, 23:24, :2]
-                j2dc_occ[:, :23, :2] = j2dc_occ[:, :23, :2] - j2dc_occ[:, 23:24, :2]
-                j2dc_occ[..., -1] = dataset['joint2d_occ'][i][j][..., -1]
-                data.append(torch.cat((accc.flatten(1), oric.flatten(1), j2dc_occ.flatten(1)), dim=1)[1:-1])
-                label.append(j3dc.flatten(1)[1:-1])
-        return RNNDataset(data, label, split_size=split_size, device=device, augment_fn=augment_fn)
 
     class AMASSDataset(RNNDataset):
         r"""
@@ -513,30 +429,9 @@ def train_rnn4():
                 j3dw_mp[:, 26] = j3dw[:, 5].clone()
                 j3dw_mp[:, 27] = j3dw[:, 7].clone()
                 j3dw_mp[:, 28] = j3dw[:, 8].clone()
-                if split_size > 0:
-                    T = j3dw.shape[0]
-                    for start in range(0, T, split_size):
-                        end = min(start + split_size, T)
-                        if end - start < 10:  # Skip very short chunks
-                            continue
-
-                        # Chunk slice
-                        accw_chunk = accw[start:end]
-                        oriw_chunk = oriw[start:end]
-                        j3dw_mp_chunk = j3dw_mp[start:end]
-                        j3dw_chunk = j3dw[start:end]
-
-                        # Re-center relative to the START of this chunk to keep values small
-                        chunk_root_offset = j3dw_chunk[0, 0].clone()
-                        j3dw_chunk = j3dw_chunk - chunk_root_offset
-                        j3dw_mp_chunk = j3dw_mp_chunk - chunk_root_offset
-
-                        data.append(torch.cat((accw_chunk.flatten(1), oriw_chunk.flatten(1), j3dw_mp_chunk.flatten(1)), dim=1)[1:-1])
-                        label.append(j3dw_chunk.flatten(1)[1:-1])
-                else:
-                    data.append(torch.cat((accw.flatten(1), oriw.flatten(1), j3dw_mp.flatten(1)), dim=1)[1:-1])
-                    label.append(j3dw.flatten(1)[1:-1])
-            super(AMASSDataset, self).__init__(data, label, split_size=-1)
+                data.append(torch.cat((accw.flatten(1), oriw.flatten(1), j3dw_mp.flatten(1)), dim=1)[1:-1])
+                label.append(j3dw.flatten(1)[1:-1])
+            super(AMASSDataset, self).__init__(data, label, split_size=split_size)
 
         def __getitem__(self, i):
             data, label = super(AMASSDataset, self).__getitem__(i)
@@ -578,12 +473,10 @@ def train_rnn4():
     save_dir = os.path.join(paths.weight_dir, Net.name, 'rnn4')
     net = Net().rnn4.to(device)
     train_dataloader = DataLoader(ConcatDataset([
-        AISTDataset(paths.aist_dir, kind='train', split_size=200),
         AMASSDataset(paths.amass_dir, kind='train', split_size=200)
     ]), 256, shuffle=True, collate_fn=RNNDataset.collate_fn)
     valid_dataloader = DataLoader(ConcatDataset([
-        AISTDataset(paths.aist_dir, kind='val', split_size=200),
-        AMASSDataset(paths.amass_dir, kind='val', split_size=200)
+        AMASSDataset(paths.amass_dir, kind='val')
     ]), 64, collate_fn=RNNDataset.collate_fn)
     # train_dataloader = DataLoader(AISTDataset(paths.aist_dir, kind='train', split_size=200), 256, shuffle=True, collate_fn=RNNDataset.collate_fn)
     # valid_dataloader = DataLoader(AISTDataset(paths.aist_dir, kind='val'), 64, collate_fn=RNNDataset.collate_fn)
@@ -591,7 +484,7 @@ def train_rnn4():
     # after 100 epoch, use lr=1e-4 for another 50 epoch on occlusion data, then use lr=1e-4 for another 50 epoch on aist origin data
     train(net, train_dataloader, valid_dataloader, save_dir, loss_fn=rnn_mse_loss_fn, eval_fn=rnn_dist_eval_fn,
           num_epoch=200, num_iter_between_vald=60, clip_grad_norm=1, load_last_states=True,
-          eval_metric_names=['distance error (m)'], wandb_project_name='sig_mp_amass_aist',
+          eval_metric_names=['distance error (m)'], wandb_project_name='sig_mp_amass',
           wandb_config=None, wandb_watch=True, wandb_name='rnn4_final', optimizer=optimizer)
 
 def train_rnn6():
@@ -600,41 +493,6 @@ def train_rnn6():
         x = x.clone()
         x[:, -69:] = torch.normal(x[:, -69:], 0.03)
         return x
-
-    def AISTDataset(data_dir, kind, split_size=-1):
-        print('Reading %s dataset "%s"' % (kind, data_dir))
-        dataset = torch.load(os.path.join(data_dir, kind + '.pt'))
-        data, label = [], []
-        for i in tqdm.trange(len(dataset['pose'])):
-            for j in range(9):
-                if dataset['joint2d_mp'][i][j] is None: continue
-                Tcw = dataset['cam_T'][i][j]
-                Kinv = dataset['cam_K'][i][j].inverse()
-                oric = Tcw[:3, :3].matmul(dataset['imu_ori'][i])
-                accc = Tcw.matmul(art.math.append_zero(dataset['imu_acc'][i]).unsqueeze(-1)).squeeze(-1)[..., :3]
-                tranc = Tcw.matmul(art.math.append_one(dataset['tran'][i]).unsqueeze(-1)).squeeze(-1)[..., :3]
-                j3dc = Tcw.matmul(art.math.append_one(dataset['joint3d'][i]).unsqueeze(-1)).squeeze(-1)[..., :3]
-                j3dc = j3dc[:, 1:] - j3dc[:, :1]
-                # tranc = tranc - torch.tensor(tran_offset)
-                j2dc = torch.zeros(len(oric), 33, 3)
-                j2dc[..., :2] = dataset['joint2d_mp'][i][j][..., :2]
-                j2dc[..., 0] = j2dc[..., 0] * 1920
-                j2dc[..., 1] = j2dc[..., 1] * 1080
-                j2dc = Kinv.matmul(art.math.append_one(j2dc[..., :2]).unsqueeze(-1)).squeeze(-1)
-                j2dc[..., -1] = dataset['joint2d_mp'][i][j][..., -1]
-                data.append(torch.cat((accc.flatten(1), oric.flatten(1), j2dc.flatten(1), j3dc.flatten(1)), dim=1)[1:-1])
-                label.append(tranc.flatten(1)[1:-1])
-
-                # if dataset['joint2d_occ'][i][j] is None or len(dataset['joint2d_occ'][i][j]) != len(oric): continue
-                # j2dc_occ = torch.zeros(len(oric), 33, 3)
-                # j2dc_occ[..., :2] = dataset['joint2d_occ'][i][j][..., :2]
-                # j2dc_occ[..., 0] = j2dc_occ[..., 0] * 1920
-                # j2dc_occ[..., 1] = j2dc_occ[..., 1] * 1080
-                # j2dc_occ = Kinv.matmul(art.math.append_one(j2dc_occ[..., :2]).unsqueeze(-1)).squeeze(-1)
-                # j2dc_occ[..., -1] = dataset['joint2d_occ'][i][j][..., -1]
-                # data.append(torch.cat((accc.flatten(1), oric.flatten(1), j2dc_occ.flatten(1), j3dc.flatten(1)), dim=1)[1:-1])
-                # label.append(tranc.flatten(1)[1:-1])
-        return RNNDataset(data, label, split_size=split_size, device=device, augment_fn=augment_fn)
 
     class AMASSDataset(RNNDataset):
         r"""
@@ -663,33 +521,9 @@ def train_rnn6():
                 j3dw_mp[:, 26] = j3dw[:, 5].clone()
                 j3dw_mp[:, 27] = j3dw[:, 7].clone()
                 j3dw_mp[:, 28] = j3dw[:, 8].clone()
-                if split_size > 0:
-                    T = j3dw.shape[0]
-                    for start in range(0, T, split_size):
-                        end = min(start + split_size, T)
-                        if end - start < 10:  # Skip very short chunks
-                            continue
-                        
-                        # Chunk slice
-                        accw_chunk = accw[start:end]
-                        oriw_chunk = oriw[start:end]
-                        j3dw_mp_chunk = j3dw_mp[start:end]
-                        j3dw_chunk = j3dw[start:end]
-                        
-                        # Re-center relative to the START of this chunk to keep values small
-                        # RobustCap's j3dw is already centered to sequence[0]. 
-                        # We need to subtract the displacement of chunk[0] relative to sequence[0].
-                        # chunk[0] is j3dw[start]. Its root is j3dw[start][0].
-                        chunk_root_offset = j3dw_chunk[0, 0].clone() 
-                        j3dw_chunk = j3dw_chunk - chunk_root_offset
-                        j3dw_mp_chunk = j3dw_mp_chunk - chunk_root_offset
-                        
-                        data.append(torch.cat((accw_chunk.flatten(1), oriw_chunk.flatten(1), j3dw_mp_chunk.flatten(1)), dim=1)[1:-1])
-                        label.append(j3dw_chunk.flatten(1)[1:-1])
-                else:
-                    data.append(torch.cat((accw.flatten(1), oriw.flatten(1), j3dw_mp.flatten(1)), dim=1)[1:-1])
-                    label.append(j3dw.flatten(1)[1:-1])
-            super(AMASSDataset, self).__init__(data, label, split_size=-1)
+                data.append(torch.cat((accw.flatten(1), oriw.flatten(1), j3dw_mp.flatten(1)), dim=1)[1:-1])
+                label.append(j3dw.flatten(1)[1:-1])
+            super(AMASSDataset, self).__init__(data, label, split_size=split_size)
 
         def __getitem__(self, i):
             data, label = super(AMASSDataset, self).__getitem__(i)
@@ -729,16 +563,14 @@ def train_rnn6():
     save_dir = os.path.join(paths.weight_dir, Net.name, 'rnn6')
     net = Net().rnn6.to(device)
     train_dataloader = DataLoader(ConcatDataset([
-        AISTDataset(paths.aist_dir, kind='train', split_size=200),
         AMASSDataset(paths.amass_dir, kind='train', split_size=200)
     ]), 256, shuffle=True, collate_fn=RNNDataset.collate_fn)
     valid_dataloader = DataLoader(ConcatDataset([
-        AISTDataset(paths.aist_dir, kind='val', split_size=200),
-        AMASSDataset(paths.amass_dir, kind='val', split_size=200)
+        AMASSDataset(paths.amass_dir, kind='val')
     ]), 64, collate_fn=RNNDataset.collate_fn)
     train(net, train_dataloader, valid_dataloader, save_dir, loss_fn=rnn_loss_fn, eval_fn=rnn_loss_fn,
           num_epoch=100, num_iter_between_vald=60, clip_grad_norm=1, load_last_states=True,
-          wandb_project_name='sig_mp_amass_aist',
+          wandb_project_name='sig_mp_amass',
           wandb_config=None, wandb_watch=True, wandb_name='rnn6', lr_scheduler_patience=5)
 
 
@@ -746,27 +578,6 @@ def train_rnn7():
     def augment_fn(x):
         x = torch.normal(x, 0.03)
         return x
-
-    def AISTDataset(data_dir, kind, split_size=-1):
-        r"""
-        kind in ['train', 'val', 'test']
-        """
-        print('Reading %s dataset "%s"' % (kind, data_dir))
-        dataset = torch.load(os.path.join(data_dir, kind + '.pt'))
-        data, label = [], []
-        for i in tqdm.trange(len(dataset['pose'])):  # ith sequence
-            Rrw = art.math.axis_angle_to_rotation_matrix(dataset['pose'][i][:, :3]).transpose(1, 2)
-            orir = dataset['imu_ori'][i].clone()
-            orir[:, :5] = Rrw.unsqueeze(1).matmul(dataset['imu_ori'][i][:, :5])
-            accr = Rrw.unsqueeze(1).matmul(dataset['imu_acc'][i].unsqueeze(-1)).squeeze(-1)
-            j3dr = Rrw.unsqueeze(1).matmul(dataset['joint3d'][i].unsqueeze(-1)).squeeze(-1)
-            j3dr = j3dr[:, 1:] - j3dr[:, :1]
-            pose = art.math.axis_angle_to_rotation_matrix(dataset['pose'][i]).view(-1, 24, 3, 3)
-            pose[:, 0] = torch.eye(3)
-            pose = art.math.rotation_matrix_to_r6d(body_model.forward_kinematics_R(pose)).view(-1, 24, 6)
-            data.append(torch.cat((accr.flatten(1), orir.flatten(1), j3dr.flatten(1)), dim=1)[1:-1])
-            label.append(pose.flatten(1)[1:-1])
-        return RNNDataset(data, label, split_size=split_size, augment_fn=augment_fn, device=device)
 
     def AMASSDataset(data_dir, kind, split_size=-1):
         r"""
@@ -818,17 +629,15 @@ def train_rnn7():
     net = Net().rnn7.to(device)
 
     train_dataloader = DataLoader(ConcatDataset([
-        AISTDataset(paths.aist_dir, kind='train', split_size=200),
         AMASSDataset(paths.amass_dir, kind='train', split_size=200)
     ]), 256, shuffle=True, collate_fn=RNNDataset.collate_fn)
     valid_dataloader = DataLoader(ConcatDataset([
-        AISTDataset(paths.aist_dir, kind='val', split_size=200),
-        AMASSDataset(paths.amass_dir, kind='val', split_size=200)
+        AMASSDataset(paths.amass_dir, kind='val')
     ]), 64, collate_fn=RNNDataset.collate_fn)
 
     train(net, train_dataloader, valid_dataloader, save_dir, loss_fn=rnn_loss_fn, eval_fn=rnn_loss_fn,
           num_epoch=120, num_iter_between_vald=20, clip_grad_norm=1, load_last_states=True,
-          wandb_project_name='sig_mp_amass_aist',
+          wandb_project_name='sig_mp_amass',
           wandb_config=None, wandb_watch=True, wandb_name='rnn7', lr_scheduler_patience=5)
 
 
@@ -869,7 +678,7 @@ def train_rnn8():
 
     train_dataloader = DataLoader(AMASSDataset(paths.amass_dir, kind='train', split_size=200), 256, shuffle=True,
                                   collate_fn=RNNDataset.collate_fn)
-    valid_dataloader = DataLoader(AMASSDataset(paths.amass_dir, kind='val', split_size=200), 64, collate_fn=RNNDataset.collate_fn)
+    valid_dataloader = DataLoader(AMASSDataset(paths.amass_dir, kind='val'), 64, collate_fn=RNNDataset.collate_fn)
 
     all_labels = torch.cat(train_dataloader.dataset.label)
     pos_weight = (1 - all_labels).sum(dim=0) / all_labels.sum(dim=0)
@@ -880,7 +689,7 @@ def train_rnn8():
 
     train(net, train_dataloader, valid_dataloader, save_dir, loss_fn=rnn_bce_loss_fn, eval_fn=rnn_bce_loss_fn,
           num_epoch=80, num_iter_between_vald=20, clip_grad_norm=1, load_last_states=True,
-          wandb_project_name='sig_mp_amass_aist',
+          wandb_project_name='sig_mp_amass',
           wandb_config=None, wandb_watch=True, wandb_name='rnn8', lr_scheduler_patience=10)
 
 
