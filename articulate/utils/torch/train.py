@@ -11,6 +11,7 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 from thop import clever_format
 import wandb
+import time
 
 def train(net, train_dataloader, vald_dataloader=None, save_dir='weights', loss_fn=torch.nn.MSELoss(),
           eval_fn=None, optimizer=None, num_epoch=5000, num_iter_between_vald=-1, early_stop_threshold=-1,
@@ -111,8 +112,10 @@ def train(net, train_dataloader, vald_dataloader=None, save_dir='weights', loss_
         net.train()
         train_loss = 0
         vald_loss_epoch = 0
+        last_log_time = time.time()
         for i, (d, l) in enumerate(train_dataloader):
             if i < train_info['it']:
+                last_log_time = time.time()
                 continue
             loss = loss_fn(net(d), l)
             optimizer.zero_grad()
@@ -129,10 +132,13 @@ def train(net, train_dataloader, vald_dataloader=None, save_dir='weights', loss_
                     train_loss /= num_train_step
                     vald_loss = torch.tensor([train_loss]) if vald_dataloader is None else \
                         sum([eval_fn(net(d), l) for d, l in vald_dataloader]) / num_vald_step
-                print('epoch: %-4d/%4d    iter: %-4d/%4d    total_it: %s    train_loss: %.6f    vald_loss: %s' %
+                
+                current_time = time.time()
+                iter_per_sec = num_train_step / (current_time - last_log_time)
+                print('epoch: %-4d/%4d    iter: %-4d/%4d    total_it: %s    train_loss: %.6f    vald_loss: %s    iter/s: %.2f' %
                       (epoch, num_epoch, i + 1, num_iter_per_eopch, clever_format(total_it, '%6.2f'),
-                       train_loss, vald_loss.cpu()), end='')
-                wandb.log({'train_loss': train_loss, 'vald_loss': vald_loss.cpu().item()})
+                       train_loss, vald_loss.cpu(), iter_per_sec), end='')
+                wandb.log({'train_loss': train_loss, 'vald_loss': vald_loss.cpu().item(), 'iter_per_sec': iter_per_sec})
                 vald_loss_epoch = vald_loss_epoch + vald_loss.cpu().item()
                 torch.save(net.state_dict(), weights_file)
                 torch.save(optimizer.state_dict(), optimizer_states_file)
@@ -157,6 +163,7 @@ def train(net, train_dataloader, vald_dataloader=None, save_dir='weights', loss_
 
                 train_loss = 0
                 net.train()
+                last_log_time = time.time()
         if lr_scheduler_patience is not None:
             lr_scheduler.step(vald_loss_epoch)
         train_info['it'] = 0
