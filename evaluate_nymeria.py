@@ -6,7 +6,7 @@ import numpy as np
 import cv2
 import random
 from config import paths
-from net.sig_mp_nymeria import Net, NYMERIA_DIR
+from net.sig_mp_aist_nymeria import Net, NYMERIA_DIR
 import ipdb
 import signal
 import traceback as tb
@@ -108,7 +108,12 @@ def view_nymeria_ours(seq_idx=0, vis=True, run_smplify=True, save_mp4=False):
     accw = dataset['imu_acc'][seq_idx].reshape(-1, 6, 3, 1).to(device) # (T, 6, 3, 1)
     oriw = dataset['imu_ori'][seq_idx].reshape(-1, 6, 3, 3).to(device) # (T, 6, 3, 3)
     j3dw_mp = dataset['sync_3d_mp'][seq_idx].reshape(-1, 33, 3, 1).to(device)
-    j3dw = dataset['joint3d'][seq_idx].reshape(-1, 24, 3, 1).to(device) # Label/GT for verification
+    j3dw = dataset['joint3d'][seq_idx].reshape(-1, 24, 3, 1).to(device)
+
+    # [Correctness] Center the sequence
+    root_offset = j3dw[0, 0].clone()
+    j3dw = j3dw - root_offset
+    j3dw_mp = j3dw_mp - root_offset
     
     # 1. Coordinate Transform (World -> Virtual Camera)
     Rcw = get_virtual_camera_transform(fixed_view=True) # (3, 3)
@@ -298,64 +303,111 @@ def evaluate_nymeria_metrics(run_smplify=False):
         accw = dataset['imu_acc'][seq_idx].reshape(-1, 6, 3, 1).to(device)
         oriw = dataset['imu_ori'][seq_idx].reshape(-1, 6, 3, 3).to(device)
         j3dw_mp = dataset['sync_3d_mp'][seq_idx].reshape(-1, 33, 3, 1).to(device)
-        j3dw = dataset['joint3d'][seq_idx].reshape(-1, 24, 3, 1).to(device) # GT (World)
+        j3dw = dataset['joint3d'][seq_idx].reshape(-1, 24, 3, 1).to(device)
 
-        # Coordinate Transform (Fix View for consistent Eval)
-        Rcw = get_virtual_camera_transform(fixed_view=True)
-        accc = Rcw.matmul(accw)
-        oric = Rcw.matmul(oriw)
-        j3dc = Rcw.matmul(j3dw).squeeze(-1)
-        j3dc_mp = Rcw.matmul(j3dw_mp).squeeze(-1)
+       
+        root_offset = j3dw[0, 0].clone()
+        j3dw = j3dw - root_offset
+        j3dw_mp = j3dw_mp - root_offset
+        
+        # --- Chunked Inference ---
+        split_size = 200
+        T = len(j3dw)
+        
+        pose_seq_global = []
+        tran_seq_global = []
+     
+        
+        for start in tqdm.tqdm(range(0, T, split_size)):
+            end = min(start + split_size, T)
+            if end - start < 2: continue # Skip tiny end bits
+            
+            # 1. Slice Chunk
+            accw_chunk = accw[start:end].clone()
+            oriw_chunk = oriw[start:end].clone()
+            j3dw_mp_chunk = j3dw_mp[start:end].clone()
+            j3dw_chunk = j3dw[start:end].clone()
+            
+            # 2. Re-center relative to Chunk Start
+            chunk_root_offset = j3dw_chunk[0, 0].clone()
+            j3dw_chunk = j3dw_chunk - chunk_root_offset
+            j3dw_mp_chunk = j3dw_mp_chunk - chunk_root_offset
+            
+            # 3. Virtual Camera Transform (Per Chunk, like training)
+            Rcw = get_virtual_camera_transform(fixed_view=True)
+            
+            # 4. Transform to Camera Frame
+            accc_chunk = Rcw.matmul(accw_chunk)
+            oric_chunk = Rcw.matmul(oriw_chunk)
+            
+            j3dw_mp_chunk = j3dw_mp_chunk.reshape(j3dw_mp_chunk.shape[0], 33, 3, 1)
+            
+            j3dc_chunk = Rcw.matmul(j3dw_chunk).squeeze(-1)
+            j3dc_mp_chunk = Rcw.matmul(j3dw_mp_chunk).squeeze(-1)
+            
+            # 5. Translation & Depth
+            random_tranc = get_virtual_translation(j3dc_chunk, fixed_view=True)
+            # j3dc_chunk = j3dc_chunk + random_tranc # Not needed for input, only for label/debug
+            j3dc_mp_chunk = j3dc_mp_chunk + random_tranc
+            
+            # 6. Normalize & BBox
+            j2dc_chunk = j3dc_mp_chunk / j3dc_mp_chunk[..., -1:]
+            j2dc_chunk[..., -1] = 1.0 # Conf
+            bbox_scale = get_bbox_scale(j2dc_chunk).view(-1, 1, 1)
+            j2dc_chunk[..., :2] = j2dc_chunk[..., :2] / bbox_scale
+            j2dc_chunk[:, 24:, :2] = j2dc_chunk[:, 24:, :2] - j2dc_chunk[:, 23:24, :2]
+            j2dc_chunk[:, :23, :2] = j2dc_chunk[:, :23, :2] - j2dc_chunk[:, 23:24, :2]
+            
+            # 7. Network Inputs
+            j2dc_input = j2dc_chunk
+            accc_input = accc_chunk.squeeze(-1)
+            oric_input = oric_chunk
+            
+            # Update Gravity for this view
+            g_world = torch.tensor([0., -1., 0.], device=device).reshape(3, 1)
+            g_cam = Rcw.matmul(g_world).view(3)
+            Net.gravityc = g_cam
+            
+            # 8. Run Inference for this Chunk
+            net.reset_states() # Must reset because input coordinate system changed!
+         
+            first_tran_cam = random_tranc 
+            
+            chunk_pose_preds = []
+            chunk_tran_preds = []
+            
+            for i in range(len(j2dc_input)):
+                if i == 0:
+                    p, t = net.forward_online(j2dc_input[i], accc_input[i], oric_input[i], first_tran_cam)
+                else:
+                    p, t = net.forward_online(j2dc_input[i], accc_input[i], oric_input[i])
+                chunk_pose_preds.append(p)
+                chunk_tran_preds.append(t)
+            
+            chunk_pose_preds = torch.stack(chunk_pose_preds) # (T_chunk, 24, 3, 3) in Camera Frame
+            chunk_tran_preds = torch.stack(chunk_tran_preds) # (T_chunk, 3) in Camera Frame
+      
+            tran_chunk_world = Rcw.t().matmul((chunk_tran_preds - random_tranc).unsqueeze(-1))
+            tran_chunk_global = tran_chunk_world + chunk_root_offset
+            tran_chunk_global = tran_chunk_global.squeeze(-1)
+            
+    
+            chunk_pose_global = chunk_pose_preds.clone()
+            chunk_pose_global[:, 0] = Rcw.t().matmul(chunk_pose_preds[:, 0])
+            
+            pose_seq_global.append(chunk_pose_global)
+            tran_seq_global.append(tran_chunk_global)
+            
+        pose_pred = torch.cat(pose_seq_global, dim=0)
+        tran_pred = torch.cat(tran_seq_global, dim=0)
+        
+        # --- End Chunked Inference ---
 
-        random_tranc = get_virtual_translation(j3dc, fixed_view=True)
-        j3dc = j3dc + random_tranc
-        j3dc_mp = j3dc_mp + random_tranc
-
-        j2dc = j3dc_mp / j3dc_mp[..., -1:]
-        j2dc[..., -1] = 1.0 # Conf
-        bbox_scale = get_bbox_scale(j2dc).view(-1, 1, 1)
-        j2dc[..., :2] = j2dc[..., :2] / bbox_scale
-        j2dc[:, 24:, :2] = j2dc[:, 24:, :2] - j2dc[:, 23:24, :2]
-        j2dc[:, :23, :2] = j2dc[:, :23, :2] - j2dc[:, 23:24, :2]
-
-        j2dc_input = j2dc
-        accc_input = accc.squeeze(-1)
-        oric_input = oric
-
-        g_world = torch.tensor([0., -1., 0.], device=device).reshape(3, 1)
-        g_cam = Rcw.matmul(g_world).view(3)
-        Net.gravityc = g_cam
-
-        # --- Inference ---
-        pose_seq, tran_seq = [], []
-        first_tran_gt = j3dc[0, 0] # GT Root for initialization
-
-        net.reset_states() # Important!
-
-        # Loop over frames
-        for i in tqdm.tqdm(range(len(j2dc_input))):
-            if i == 0:
-                p, t = net.forward_online(j2dc_input[i], accc_input[i], oric_input[i], first_tran_gt)
-            else:
-                p, t = net.forward_online(j2dc_input[i], accc_input[i], oric_input[i])
-            pose_seq.append(p)
-            tran_seq.append(t)
-
-        pose_pred = torch.stack(pose_seq) # (T, 24, 3, 3)
-        tran_pred = torch.stack(tran_seq) # (T, 3)
-
-        if run_smplify:
-            # Recompute j2dc_opt correctly if needed, for now skip to keep it simple or implement if requested
-            pass
-
-        # --- Prepare GT for Evaluation ---
-        # Rotate GT Pose to Camera Frame for comparison
+        # Prepare GT for Evaluation (In World Frame)
         gt_pose_aa = dataset['pose'][seq_idx].to(device)
         gt_pose_rotmat = art.math.axis_angle_to_rotation_matrix(gt_pose_aa).view(-1, 24, 3, 3)
-        gt_pose_rotmat[:, 0] = Rcw.matmul(gt_pose_rotmat[:, 0])
 
-        # GT Tran
-        gt_tran = j3dc[:, 0]
+        gt_tran = j3dw[:, 0]
 
         pose_p_list.append(pose_pred.cpu())
         tran_p_list.append(tran_pred.cpu())
@@ -381,6 +433,10 @@ def view_nymeria_unity(seq_idx=0):
     oriw = dataset['imu_ori'][seq_idx].reshape(-1, 6, 3, 3).to(device)
     j3dw_mp = dataset['sync_3d_mp'][seq_idx].reshape(-1, 33, 3, 1).to(device)
     j3dw = dataset['joint3d'][seq_idx].reshape(-1, 24, 3, 1).to(device)
+
+    root_offset = j3dw[0, 0].clone()
+    j3dw = j3dw - root_offset
+    j3dw_mp = j3dw_mp - root_offset
     
     Rcw = get_virtual_camera_transform(fixed_view=True)
     accc = Rcw.matmul(accw) # (T, 6, 3, 1)
@@ -426,21 +482,6 @@ def view_nymeria_unity(seq_idx=0):
         
     pose_pred = torch.stack(pose_pred)
     tran_pred = torch.stack(tran_pred)
-    
-    # Unity Export
-    # Align to start at 0? Or keep camera frame coords?
-    # Unity usually wants World coords. But we are in "Virtual Camera" coords.
-    # We can perform the INVERSE of Rcw to go back to World?
-    # Or just export Camera Frame motion (Unity will view it relative to origin).
-    # evaluate.py view_aist_unity does:
-    # pose[:, 0] = Tcw.T @ pose[:, 0]  (Back to World)
-    # tran = Tcw.T @ tran + Tcw_pos
-    # We should do the same to restore original world orientation.
-    # Rcw is our "Tcw" (Rotation part, since we assumed T=0 for rotation, but we added Translation later).
-    # Wait, strict checking:
-    # We applied Rcw (Rot) then random_tranc (Trans).
-    # So P_cam = Rcw @ P_world + random_tranc.
-    # To invert: P_world = Rcw.T @ (P_cam - random_tranc).
     
     tran_world = Rcw.t().matmul((tran_pred - random_tranc).unsqueeze(-1)).squeeze(-1)
     pose_pred[:, 0] = Rcw.t().matmul(pose_pred[:, 0]) # Rotate root orientation back

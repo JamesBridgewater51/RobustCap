@@ -2,7 +2,7 @@ import torch
 import os
 import argparse
 from config import paths
-from net.sig_mp_nymeria import Net
+from net.sig_mp_aist_nymeria import Net
 
 def merge_weights(target_net_name=None):
     if target_net_name is None:
@@ -13,7 +13,7 @@ def merge_weights(target_net_name=None):
     
     # List of stages to merge. Note: rnn6 and rnn7 are also part of the full pipeline if used.
     # rnn8 is optional/experimental often.
-    stages = ['rnn2', 'rnn3', 'rnn4', 'rnn6', 'rnn7']
+    stages = ['rnn2', 'rnn3', 'rnn4', 'rnn6', 'rnn7', 'rnn8']
     
     full_state_dict = {}
     missing_stages = []
